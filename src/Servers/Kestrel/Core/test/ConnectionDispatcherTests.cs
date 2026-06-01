@@ -58,10 +58,18 @@ public class ConnectionDispatcherTests : LoggedTest
     public async Task StartAcceptingConnectionsAsyncLogsIfAcceptAsyncThrows()
     {
         var serviceContext = new TestServiceContext(LoggerFactory);
+        var expectedException = new InvalidOperationException("Unexpected error listening");
 
-        var dispatcher = new ConnectionDispatcher<ConnectionContext>(serviceContext, _ => Task.CompletedTask, new TransportConnectionManager(serviceContext.ConnectionManager));
+        var dispatcher = new ConnectionDispatcher<ConnectionContext>(serviceContext, _ => Task.CompletedTask, new TransportConnectionManager(serviceContext.ConnectionManager), ex =>
+        {
+            Assert.Same(expectedException, ex);
+            return true;
+        });
 
-        await dispatcher.StartAcceptingConnections(new ThrowingListener());
+        var task = dispatcher.StartAcceptingConnections(new ThrowingListener(expectedException));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () => await task);
+        Assert.Same(expectedException, exception);
 
         var critical = TestSink.Writes.SingleOrDefault(m => m.LogLevel == LogLevel.Critical);
         Assert.NotNull(critical);
@@ -125,11 +133,18 @@ public class ConnectionDispatcherTests : LoggedTest
 
     private class ThrowingListener : IConnectionListener<ConnectionContext>
     {
+        private readonly Exception _exception;
+
+        public ThrowingListener(Exception exception = null)
+        {
+            _exception = exception ?? new InvalidOperationException("Unexpected error listening");
+        }
+
         public EndPoint EndPoint { get; set; }
 
         public ValueTask<ConnectionContext> AcceptAsync(CancellationToken cancellationToken = default)
         {
-            throw new InvalidOperationException("Unexpected error listening");
+            throw _exception;
         }
 
         public ValueTask DisposeAsync()

@@ -12,13 +12,15 @@ internal sealed class ConnectionDispatcher<T> where T : BaseConnectionContext
     private readonly ServiceContext _serviceContext;
     private readonly Func<T, Task> _connectionDelegate;
     private readonly TransportConnectionManager _transportConnectionManager;
+    private readonly Func<Exception, bool>? _fatalErrorHandler;
     private readonly TaskCompletionSource _acceptLoopTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    public ConnectionDispatcher(ServiceContext serviceContext, Func<T, Task> connectionDelegate, TransportConnectionManager transportConnectionManager)
+    public ConnectionDispatcher(ServiceContext serviceContext, Func<T, Task> connectionDelegate, TransportConnectionManager transportConnectionManager, Func<Exception, bool>? fatalErrorHandler = null)
     {
         _serviceContext = serviceContext;
         _connectionDelegate = connectionDelegate;
         _transportConnectionManager = transportConnectionManager;
+        _fatalErrorHandler = fatalErrorHandler;
     }
 
     private KestrelTrace Log => _serviceContext.Log;
@@ -37,11 +39,43 @@ internal sealed class ConnectionDispatcher<T> where T : BaseConnectionContext
 
         async Task AcceptConnectionsAsync()
         {
+            Exception? acceptLoopException = null;
+
             try
             {
                 while (true)
                 {
-                    var connection = await listener.AcceptAsync();
+                    T? connection;
+                    try
+                    {
+                        connection = await listener.AcceptAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        // REVIEW: If the accept loop ends should this trigger a server shutdown? It will manifest as a hang
+                        try
+                        {
+                            Log.LogCritical(0, ex, "The connection listener failed to accept any new connections.");
+                        }
+                        catch
+                        {
+                        }
+
+                        acceptLoopException = ex;
+
+                        try
+                        {
+                            if (_fatalErrorHandler?.Invoke(ex) != true)
+                            {
+                                Environment.FailFast("The connection listener failed to accept any new connections.", ex);
+                            }
+                        }
+                        catch
+                        {
+                        }
+
+                        break;
+                    }
 
                     if (connection == null)
                     {
@@ -75,7 +109,14 @@ internal sealed class ConnectionDispatcher<T> where T : BaseConnectionContext
             }
             finally
             {
-                _acceptLoopTcs.TrySetResult();
+                if (acceptLoopException is null)
+                {
+                    _acceptLoopTcs.TrySetResult();
+                }
+                else
+                {
+                    _acceptLoopTcs.TrySetException(acceptLoopException);
+                }
             }
         }
     }
